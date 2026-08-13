@@ -1,0 +1,18 @@
+// SplitFlow — Prisma schema (PLACEHOLDER)
+//
+// This file intentionally does NOT define the final data model yet.
+// The planned entities and relationships are described in
+// /docs/database.md. The actual schema will be authored in a later
+// development phase, once the entity design is reviewed and approved.
+//
+// generator client {
+//   provider = "prisma-client-js"
+// }
+//
+// datasource db {
+//   provider = "postgresql"
+//   url      = env("DATABASE_URL")
+// }
+//
+// Do not add models here until database.md has been reviewed and
+// the schema-design phase is explicitly kicked off.
