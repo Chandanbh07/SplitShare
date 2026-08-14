@@ -1,0 +1,6 @@
+{
+  "name": "@splitflow/validation",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Placeholder workspace member — shared Zod validation schemas are not implemented yet. See docs/architecture.md and docs/product-decisions.md (#21)."
+}

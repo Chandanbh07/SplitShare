@@ -1,18 +1,484 @@
-// SplitFlow — Prisma schema (PLACEHOLDER)
+// SplitFlow — V1 Prisma schema
 //
-// This file intentionally does NOT define the final data model yet.
-// The planned entities and relationships are described in
-// /docs/database.md. The actual schema will be authored in a later
-// development phase, once the entity design is reviewed and approved.
+// This schema implements the V1 data model described in:
+//   - docs/database.md          (entities, relationships, financial model)
+//   - docs/product-decisions.md (locked V1 scope decisions)
+//   - docs/settlement.md        (settlement recommendation vs Settlement vs Payment)
+//   - AGENTS.md                 (binding engineering rules)
 //
-// generator client {
-//   provider = "prisma-client-js"
-// }
+// Scope is intentionally V1-only. Explicitly NOT included (future scope):
+// a stored Balance table, PaymentProfile/UPI tables, multi-currency,
+// multi-payer expenses, Budget, AI tables, recurring expenses.
 //
-// datasource db {
-//   provider = "postgresql"
-//   url      = env("DATABASE_URL")
-// }
+// Financial model (see docs/database.md for the full narrative):
+//   - Expense            = a financial fact (money actually spent).
+//   - Settlement recommendation = NOT persisted; computed on demand by the
+//     settlement engine (out of scope for this schema — no table for it).
+//   - Settlement          = a PERSISTED obligation, created only by an
+//     explicit user/system action. Does NOT itself change balances.
+//   - Payment             = execution/status against a Settlement. Only a
+//     CONFIRMED Payment affects balances. V1 supports partial payments.
 //
-// Do not add models here until database.md has been reviewed and
-// the schema-design phase is explicitly kicked off.
+// No business-invariant enforcement beyond what PostgreSQL/Prisma can
+// conveniently express at the schema level (e.g. "sum of participant
+// shares equals expense amount") is attempted here — those are deferred
+// to the backend service layer, per docs/database.md.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../apps/api/src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+/// Who can post in a group's chat.
+enum GroupChatMode {
+  EVERYONE
+  ADMINS_ONLY
+}
+
+/// A member's role within a group.
+enum GroupRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+/// A membership's current standing. Membership rows are never hard-deleted —
+/// status changes (e.g. on removal or voluntarily leaving) preserve history.
+enum GroupMemberStatus {
+  ACTIVE
+  LEFT
+  REMOVED
+}
+
+/// Lifecycle status of an Expense. Expenses are never hard-deleted —
+/// cancelling one is modelled as VOIDED, not row deletion.
+enum ExpenseStatus {
+  ACTIVE
+  VOIDED
+}
+
+/// Lifecycle status of a persisted Settlement (an obligation, not money
+/// movement). STALE marks a settlement whose underlying balances may have
+/// shifted since it was created (see Settlement.financialVersion below).
+enum SettlementStatus {
+  OPEN
+  PARTIALLY_PAID
+  SETTLED
+  CANCELLED
+  STALE
+}
+
+/// How a Payment was/ is being executed. V1 only supports MANUAL; future
+/// methods (e.g. UPI) are explicitly out of scope for this schema.
+enum PaymentMethod {
+  MANUAL
+}
+
+/// Lifecycle status of a Payment. Only CONFIRMED payments affect balances.
+enum PaymentStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+  CANCELLED
+}
+
+/// The kind of content a Message carries.
+enum MessageType {
+  TEXT
+  IMAGE
+  FILE
+  EXPENSE_REFERENCE
+  SYSTEM
+}
+
+// =============================================================================
+// USER
+// =============================================================================
+
+/// Application-level profile for an authenticated person. Authentication
+/// itself is owned by Supabase Auth — this table stores profile data only
+/// and never stores passwords or other auth credentials. `supabaseUserId`
+/// links this profile to the Supabase-managed identity without duplicating
+/// credential material.
+model User {
+  id             String  @id @default(uuid())
+  supabaseUserId String  @unique
+  email          String? @unique
+  phone          String? @unique
+  displayName    String
+  avatarUrl      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Groups this user owns (direct FK on Group, distinct from membership).
+  ownedGroups Group[] @relation("GroupOwner")
+
+  // Membership rows (many-to-many with Group via GroupMember).
+  groupMemberships GroupMember[] @relation("GroupMemberUser")
+
+  // Expenses.
+  expensesPaid    Expense[] @relation("ExpensePayer")
+  expensesCreated Expense[] @relation("ExpenseCreator")
+
+  expenseParticipations ExpenseParticipant[] @relation("ExpenseParticipantUser")
+
+  // Settlements (obligations) — as obligor and as obligee.
+  settlementsSent     Settlement[] @relation("SettlementFromUser")
+  settlementsReceived Settlement[] @relation("SettlementToUser")
+
+  // Payments — as payer, as payee, and as the actor who created/confirmed.
+  paymentsSent      Payment[] @relation("PaymentFromUser")
+  paymentsReceived  Payment[] @relation("PaymentToUser")
+  paymentsCreated   Payment[] @relation("PaymentCreatedBy")
+  paymentsConfirmed Payment[] @relation("PaymentConfirmedBy")
+
+  messages      Message[]      @relation("MessageSender")
+  notifications Notification[] @relation("NotificationRecipient")
+  auditLogs     AuditLog[]     @relation("AuditLogActor")
+
+  idempotencyKeys IdempotencyKey[]
+
+  @@map("users")
+}
+
+// =============================================================================
+// GROUP / GROUP MEMBER
+// =============================================================================
+
+/// A collection of users who share expenses together.
+///
+/// `financialVersion` is incremented by backend business logic (not
+/// implemented in this schema) whenever relevant financial state changes,
+/// so a Settlement's own `financialVersion` can later be compared against
+/// it to detect staleness (see docs/database.md — "Stale settlements").
+model Group {
+  id               String        @id @default(uuid())
+  name             String
+  description      String?
+  ownerId          String
+  owner            User          @relation("GroupOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  chatMode         GroupChatMode @default(EVERYONE)
+  financialVersion Int           @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members     GroupMember[]
+  expenses    Expense[]
+  settlements Settlement[]
+  messages    Message[]
+  auditLogs   AuditLog[]
+
+  @@index([ownerId])
+  @@map("groups")
+}
+
+/// Join entity between User and Group. Never hard-deleted — leaving or
+/// being removed from a group is a status change (LEFT / REMOVED), so
+/// group membership history remains queryable indefinitely.
+model GroupMember {
+  id      String @id @default(uuid())
+  groupId String
+  group   Group  @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  userId  String
+  user    User   @relation("GroupMemberUser", fields: [userId], references: [id], onDelete: Restrict)
+
+  role   GroupRole         @default(MEMBER)
+  status GroupMemberStatus @default(ACTIVE)
+
+  joinedAt  DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // The unique constraint below also serves as the required
+  // GroupMember(groupId, userId) lookup index.
+  @@unique([groupId, userId])
+  @@index([userId])
+  @@index([groupId, status])
+  @@map("group_members")
+}
+
+// =============================================================================
+// CATEGORY
+// =============================================================================
+
+/// An expense category label. Ships with a system-provided default set
+/// (isSystem = true); not hardcoded into the Expense model itself so
+/// categories can be managed independently.
+model Category {
+  id       String  @id @default(uuid())
+  name     String
+  slug     String  @unique
+  icon     String?
+  isSystem Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  expenses Expense[]
+
+  @@index([slug])
+  @@map("categories")
+}
+
+// =============================================================================
+// EXPENSE / EXPENSE PARTICIPANT
+// =============================================================================
+
+/// A shared cost added to a group — a financial fact. V1 supports exactly
+/// one payer per expense (multi-payer is V2, not modelled here).
+///
+/// Never hard-deleted: cancelling an expense sets `status = VOIDED` on the
+/// original row rather than removing it, preserving financial history.
+///
+/// The invariant "SUM(active ExpenseParticipant.sharePaise) == amountPaise"
+/// and the "payer/participants must be active group members at creation
+/// time" rule are NOT enforced at the database level — per docs/database.md,
+/// these are backend service-layer responsibilities.
+model Expense {
+  id          String        @id @default(uuid())
+  groupId     String
+  group       Group         @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  payerId     String
+  payer       User          @relation("ExpensePayer", fields: [payerId], references: [id], onDelete: Restrict)
+  creatorId   String
+  creator     User          @relation("ExpenseCreator", fields: [creatorId], references: [id], onDelete: Restrict)
+  categoryId  String?
+  category    Category?     @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  amountPaise Int
+  description String?
+  status      ExpenseStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  participants ExpenseParticipant[]
+
+  @@index([groupId, createdAt])
+  @@index([payerId])
+  @@map("expenses")
+}
+
+/// How an Expense is split across group members. One row per participant.
+/// Never hard-deleted alongside a "cancelled" expense — the expense is
+/// voided instead, so its participant rows remain intact for history.
+model ExpenseParticipant {
+  id         String  @id @default(uuid())
+  expenseId  String
+  expense    Expense @relation(fields: [expenseId], references: [id], onDelete: Restrict)
+  userId     String
+  user       User    @relation("ExpenseParticipantUser", fields: [userId], references: [id], onDelete: Restrict)
+  sharePaise Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // The unique constraint below also serves lookups by expenseId alone
+  // (its leading column); userId gets its own index for the reverse
+  // lookup ("which expenses does this user participate in").
+  @@unique([expenseId, userId])
+  @@index([userId])
+  @@map("expense_participants")
+}
+
+// =============================================================================
+// SETTLEMENT / PAYMENT
+// =============================================================================
+
+/// A PERSISTED obligation ("fromUser owes toUser amountPaise"), created only
+/// through an explicit user or system action — never automatically from a
+/// settlement recommendation (which is computed on demand and not modelled
+/// as a table at all; see docs/settlement.md).
+///
+/// A Settlement does NOT itself change any balance — only its CONFIRMED
+/// Payment(s) do. Creating a Settlement never automatically creates a
+/// Payment.
+///
+/// `financialVersion` records the owning Group's `financialVersion` at the
+/// moment this Settlement was created, so it can later be compared against
+/// the Group's current `financialVersion` to detect staleness (the
+/// comparison/update logic itself is backend business logic, not
+/// implemented here).
+model Settlement {
+  id          String           @id @default(uuid())
+  groupId     String
+  group       Group            @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  fromUserId  String
+  fromUser    User             @relation("SettlementFromUser", fields: [fromUserId], references: [id], onDelete: Restrict)
+  toUserId    String
+  toUser      User             @relation("SettlementToUser", fields: [toUserId], references: [id], onDelete: Restrict)
+  amountPaise Int
+  status      SettlementStatus @default(OPEN)
+
+  /// Group.financialVersion at the time this Settlement was created.
+  financialVersion Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payments Payment[]
+
+  @@index([groupId, status])
+  @@index([fromUserId])
+  @@index([toUserId])
+  @@map("settlements")
+}
+
+/// The actual execution of a Settlement, including its status. A Settlement
+/// may have multiple Payments (V1 supports partial payments); the sum of a
+/// Settlement's CONFIRMED Payments must never exceed its amountPaise — this
+/// invariant is enforced by the backend service layer, not the database.
+///
+/// Only a Payment with status = CONFIRMED affects any balance calculation.
+model Payment {
+  id           String        @id @default(uuid())
+  settlementId String
+  settlement   Settlement    @relation(fields: [settlementId], references: [id], onDelete: Restrict)
+  fromUserId   String
+  fromUser     User          @relation("PaymentFromUser", fields: [fromUserId], references: [id], onDelete: Restrict)
+  toUserId     String
+  toUser       User          @relation("PaymentToUser", fields: [toUserId], references: [id], onDelete: Restrict)
+  amountPaise  Int
+  method       PaymentMethod @default(MANUAL)
+  status       PaymentStatus @default(PENDING)
+
+  createdById   String
+  createdBy     User      @relation("PaymentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  confirmedById String?
+  confirmedBy   User?     @relation("PaymentConfirmedBy", fields: [confirmedById], references: [id], onDelete: Restrict)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  confirmedAt DateTime?
+
+  // [settlementId] alone is dropped in favor of the composite index below,
+  // whose leading column (settlementId) already serves that lookup;
+  // [status] is kept for status-only queries not scoped to a settlement.
+  @@index([settlementId, status])
+  @@index([status])
+  @@map("payments")
+}
+
+// =============================================================================
+// MESSAGE (group chat)
+// =============================================================================
+
+/// A single chat message within a group. Chat behavior/delivery is not
+/// implemented here — this is storage only.
+model Message {
+  id       String      @id @default(uuid())
+  groupId  String
+  group    Group       @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  senderId String
+  sender   User        @relation("MessageSender", fields: [senderId], references: [id], onDelete: Restrict)
+  type     MessageType @default(TEXT)
+  text     String?
+
+  /// Reference (e.g. storage URL/key) to an attached file/image, if any.
+  attachmentRef String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([groupId, createdAt])
+  @@map("messages")
+}
+
+// =============================================================================
+// NOTIFICATION
+// =============================================================================
+
+/// A notification for a user. Delivery (push/email/etc.) is not implemented
+/// here — this is storage only. `type` is a free-form string rather than an
+/// enum since V1 does not lock a final notification-type list.
+model Notification {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation("NotificationRecipient", fields: [userId], references: [id], onDelete: Cascade)
+  type        String
+  title       String
+  body        String
+  data        Json?
+  readAt      DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+// =============================================================================
+// AUDIT LOG
+// =============================================================================
+
+/// Records important group and financial actions. An audit trail, NOT a
+/// financial record itself — it never replaces Expense/Settlement/Payment
+/// as the source of truth for what happened.
+///
+/// `action` is a free-form string (examples: EXPENSE_CREATED,
+/// EXPENSE_VOIDED, SETTLEMENT_CREATED, PAYMENT_CREATED, PAYMENT_CONFIRMED,
+/// PAYMENT_FAILED, GROUP_MEMBER_ADDED, GROUP_MEMBER_REMOVED — not a final
+/// enum per docs/database.md).
+///
+/// `metadata` MUST NEVER contain secrets: passwords, authentication/session
+/// tokens, UPI PINs, provider API keys, or any other credential. This is a
+/// data-entry discipline enforced by the backend service layer, not by the
+/// database — there is no schema-level way to guarantee it.
+model AuditLog {
+  id           String  @id @default(uuid())
+  actorUserId  String
+  actor        User    @relation("AuditLogActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+  groupId      String?
+  group        Group?  @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  entityType   String
+  entityId     String
+  action       String
+  metadata     Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([groupId, createdAt])
+  @@index([actorUserId])
+  @@index([entityType, entityId, createdAt])
+  @@map("audit_logs")
+}
+
+// =============================================================================
+// IDEMPOTENCY KEY
+// =============================================================================
+
+/// Supports idempotent financial mutation APIs (see docs/api.md). The exact
+/// API-level behavior (matching, replay of a stored response, etc.) is
+/// implemented later — this model only provides the storage and the
+/// uniqueness guarantee that a given user cannot reuse the same key twice.
+model IdempotencyKey {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key          String
+
+  /// The operation this key was scoped to (e.g. "CREATE_EXPENSE",
+  /// "CREATE_SETTLEMENT", "CREATE_PAYMENT") — free-form for now.
+  operation String
+
+  /// Reference to the stored response for this operation, so a retried
+  /// request with the same key can be answered without re-executing it.
+  /// Exact shape (e.g. a JSON blob vs. a pointer to another table) is left
+  /// to the backend implementation.
+  responseRef String?
+
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@unique([userId, key])
+  @@map("idempotency_keys")
+}
