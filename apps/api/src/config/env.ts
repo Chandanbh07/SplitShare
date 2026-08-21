@@ -10,11 +10,13 @@ import { z } from "zod";
  * AGENTS.md and docs/architecture.md ("Provider secrets are
  * backend-only").
  *
- * Only the variables actually needed by this foundation are marked
- * required. Variables for features that aren't implemented yet
- * (Supabase, storage, Gemini, Socket.IO CORS) are validated *if
- * present* so a malformed value fails fast, but are optional for now
- * so this foundation can start without them configured.
+ * Only the variables actually needed by what's implemented so far are
+ * marked required. Variables for features that aren't implemented yet
+ * (storage, Gemini, Socket.IO CORS) are validated *if present* so a
+ * malformed value fails fast, but stay optional. Supabase variables
+ * are also optional (see the comment above SUPABASE_URL) even though
+ * auth verification uses them, so this app can still start and serve
+ * /health without a real Supabase project configured.
  */
 
 // Best-effort local-dev convenience: load a root-level `.env` file if
@@ -52,8 +54,17 @@ const envSchema = z.object({
     .string()
     .min(1, "DATABASE_URL is required — see .env.example for the expected format."),
 
-  // Not used by this foundation (auth isn't implemented yet), but
-  // validated as non-empty strings if present.
+  // Used by Supabase Auth token verification (see
+  // src/middleware/auth.middleware.ts). Kept optional rather than
+  // required: if unset, the auth middleware treats every request as
+  // unauthenticated (401) instead of crashing the server, so
+  // /health and the unauthenticated-request path stay testable even
+  // without a real Supabase project configured. SUPABASE_ANON_KEY is
+  // the key actually used for verification (calling
+  // `auth.getUser(token)` against Supabase). SUPABASE_SERVICE_ROLE_KEY
+  // isn't used by this minimal verification flow — reserved for
+  // future elevated backend operations — but is validated here too
+  // since it's a backend-only secret regardless.
   SUPABASE_URL: optionalString(),
   SUPABASE_ANON_KEY: optionalString(),
   SUPABASE_SERVICE_ROLE_KEY: optionalString(),

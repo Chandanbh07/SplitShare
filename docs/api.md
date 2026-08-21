@@ -1,9 +1,12 @@
 # SplitFlow — API
 
 This document describes the **planned** API domains for the backend
-(`apps/api`). No endpoints have been implemented yet — this is a scope
-map for future work, so that authorization, validation, and
-consistency concerns can be considered up front.
+(`apps/api`). Most endpoints described below are still unimplemented
+— this remains primarily a scope map for future work. As of the V1
+auth foundation, `GET /health` and `GET /api/v1/me` exist; see "Auth"
+and "Users / Profiles" below. Versioned endpoints are mounted under
+an `/api/v1` prefix; `/health` is intentionally unversioned since
+it's an operational endpoint, not a product API.
 
 ## Transport
 
@@ -21,12 +24,21 @@ financial or group data.
 ### Auth
 Session/token validation against Supabase Auth; profile bootstrap
 after first sign-in. SplitFlow does not reimplement authentication —
-it validates Supabase-issued credentials.
+it validates Supabase-issued credentials. **Implemented**: the
+backend verifies a `Bearer <supabase access token>` header (via
+`supabase.auth.getUser()`) on any route mounted behind the
+`requireAuth` middleware; there is no backend-hosted login/signup
+endpoint — the client authenticates directly against Supabase Auth
+and only sends the resulting token to SplitFlow's API.
 
 ### Users / Profiles
 Read and update the current user's profile. Read limited, non-
 sensitive profile info of other users within shared groups only
-(name/avatar) — never broad user search/enumeration.
+(name/avatar) — never broad user search/enumeration. **Implemented**:
+`GET /api/v1/me` returns the caller's own SplitFlow `User` profile,
+creating it on first sign-in if it doesn't exist yet (idempotent —
+see `docs/decisions.md`). Reading other members' profiles and
+updating one's own profile are not implemented yet.
 
 ### Groups
 Create a group, update group metadata, list a user's groups, view a

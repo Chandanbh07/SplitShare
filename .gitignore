@@ -41,9 +41,3 @@ coverage/
 # Misc
 *.local
 .cache/
-
-# Prisma
-prisma/dev.db
-prisma/*.db
-prisma/migrations/dev/
-apps/api/src/generated/

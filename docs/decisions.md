@@ -199,3 +199,43 @@ transactions and keep obligations honest as new expenses arrive.
 models, application code, or dependencies were added;
 `prisma/schema.prisma` remains the existing placeholder. Historical
 entries above are left as-is, per process.
+
+---
+
+## 2026-08-19 — V1 authentication + User profile implemented
+
+**Decision:** Implemented the minimum Supabase Auth integration:
+`apps/web` authenticates directly against Supabase (email/password
+and phone/OTP, via `@supabase/supabase-js` in the browser using the
+public anon key) and never routes credentials through SplitFlow's own
+backend. `apps/api` verifies the resulting access token on protected
+routes via a `requireAuth` middleware that calls
+`supabase.auth.getUser(token)` using a server-side Supabase client
+(also constructed with the anon key — sufficient for token
+verification, no service-role key needed for this). Verified identity
+is attached to `req.auth` and is the only source of truth for "who is
+calling" — never the request body/query. Added `GET /api/v1/me`,
+introducing `/api/v1` as the versioned-endpoint prefix (`/health`
+stays unversioned as an operational endpoint). On first authenticated
+request from a given Supabase identity, the corresponding `User` row
+is created via `prisma.user.upsert` keyed on the existing unique
+`supabaseUserId` constraint — atomic and idempotent by construction,
+so concurrent first-requests can't create duplicate `User` rows. When
+Supabase isn't configured (no `SUPABASE_URL`/`SUPABASE_ANON_KEY`),
+`requireAuth` treats every request as unauthenticated (401) rather
+than crashing, so `/health` and the unauthenticated-request path stay
+testable without a real Supabase project.
+
+**Rationale:** This follows the architecture already locked in
+`docs/architecture.md` ("Authentication") and
+`docs/product-decisions.md` (backend-authoritative, provider secrets
+backend-only) without introducing a new provider or reimplementing
+credential handling — Supabase remains the only place passwords/OTPs
+ever touch. Using the anon key (not service-role) for verification
+follows the principle of least privilege: `getUser()` only needs to
+validate a token the caller already holds, not perform elevated
+admin operations.
+
+**Status:** Adopted. No Prisma schema changes were needed — the
+`User` model's existing `supabaseUserId`/`email`/`phone`/`displayName`
+fields were sufficient. `prisma/schema.prisma` is unmodified.

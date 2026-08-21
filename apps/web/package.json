@@ -1,6 +1,24 @@
 {
   "name": "@splitflow/web",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
-  "description": "Placeholder workspace member — the React/Vite frontend is not implemented yet. See docs/architecture.md."
+  "type": "module",
+  "description": "Minimal auth-testing UI for the V1 authentication foundation. The full SplitFlow frontend is not implemented yet — see docs/architecture.md.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.112.3",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
 }
