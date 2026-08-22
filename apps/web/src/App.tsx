@@ -2,7 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, isSupabaseConfigured } from "./lib/supabaseClient";
-import { fetchMe, ApiError, type MeProfile } from "./lib/api";
+import { fetchMe, listGroups, ApiError, type MeProfile, type GroupSummary } from "./lib/api";
+import GroupListView from "./components/GroupListView";
+import GroupDetailsView from "./components/GroupDetailsView";
 
 type PasswordMode = "login" | "signup";
 type AuthTab = "password" | "phone";
@@ -36,6 +38,9 @@ export default function App() {
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
 
+  const [groups, setGroups] = useState<GroupSummary[]>([]);
+  const [openGroupId, setOpenGroupId] = useState<string | null>(null);
+
   // Keep `session` in sync with Supabase's own state (initial load +
   // every subsequent sign-in/sign-out/token refresh).
   useEffect(() => {
@@ -65,6 +70,8 @@ export default function App() {
     try {
       const me = await fetchMe(accessToken);
       setProfile(me);
+      const myGroups = await listGroups(accessToken);
+      setGroups(myGroups);
     } catch (err) {
       setProfile(null);
       setProfileError(err instanceof ApiError ? `${err.message} (${err.status})` : "Failed to load profile.");
@@ -79,6 +86,8 @@ export default function App() {
     } else {
       setProfile(null);
       setProfileError(null);
+      setGroups([]);
+      setOpenGroupId(null);
     }
   }, [session?.access_token, loadProfile]);
 
@@ -176,33 +185,44 @@ export default function App() {
   if (session) {
     return (
       <div className="page">
-        <div className="card">
-          <h1>SplitFlow — Auth</h1>
-          <p className="notice notice-ok">Signed in.</p>
+        <div className="card card-wide">
+          <div className="top-bar">
+            <div>
+              <h1>SplitFlow</h1>
+              {profileLoading && <p className="muted">Loading…</p>}
+              {profileError && <p className="notice notice-error">{profileError}</p>}
+              {profile && (
+                <p className="muted">
+                  Signed in as <strong>{profile.displayName}</strong>{" "}
+                  <span className="mono small">({profile.id})</span>
+                </p>
+              )}
+            </div>
+            <button type="button" onClick={() => void handleLogout()}>
+              Log out
+            </button>
+          </div>
 
-          <section className="profile">
-            <h2>Your SplitFlow profile</h2>
-            {profileLoading && <p>Loading profile…</p>}
-            {profileError && <p className="notice notice-error">{profileError}</p>}
-            {profile && (
-              <dl>
-                <dt>Display name</dt>
-                <dd>{profile.displayName}</dd>
-                <dt>Email</dt>
-                <dd>{profile.email ?? "—"}</dd>
-                <dt>Phone</dt>
-                <dd>{profile.phone ?? "—"}</dd>
-                <dt>User ID</dt>
-                <dd className="mono">{profile.id}</dd>
-                <dt>Created</dt>
-                <dd>{new Date(profile.createdAt).toLocaleString()}</dd>
-              </dl>
-            )}
-          </section>
-
-          <button type="button" onClick={() => void handleLogout()}>
-            Log out
-          </button>
+          {profile &&
+            (openGroupId ? (
+              <GroupDetailsView
+                accessToken={session.access_token}
+                currentUserId={profile.id}
+                groupId={openGroupId}
+                onBack={() => setOpenGroupId(null)}
+                onLeft={() => {
+                  setOpenGroupId(null);
+                  void listGroups(session.access_token).then(setGroups);
+                }}
+              />
+            ) : (
+              <GroupListView
+                accessToken={session.access_token}
+                groups={groups}
+                onGroupsChange={setGroups}
+                onOpenGroup={setOpenGroupId}
+              />
+            ))}
         </div>
       </div>
     );

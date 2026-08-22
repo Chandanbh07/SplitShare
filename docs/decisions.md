@@ -239,3 +239,51 @@ admin operations.
 **Status:** Adopted. No Prisma schema changes were needed — the
 `User` model's existing `supabaseUserId`/`email`/`phone`/`displayName`
 fields were sufficient. `prisma/schema.prisma` is unmodified.
+
+---
+
+## 2026-08-22 — Groups + Members implemented
+
+**Decision:** Implemented `POST /api/v1/groups`, `GET /api/v1/groups`,
+`GET /api/v1/groups/:groupId`, `POST /api/v1/groups/:groupId/members`,
+`DELETE /api/v1/groups/:groupId/members/:userId`, and
+`POST /api/v1/groups/:groupId/leave` using the existing `User`,
+`Group`, and `GroupMember` models — no schema changes. Group creation
+writes the `Group` and its initial OWNER `GroupMember` row inside one
+`prisma.$transaction`. A new `requireActiveMembership` helper is the
+single place every group-scoped endpoint confirms access, always
+against the caller's real `GroupMember` row (never a client-supplied
+id/role); a non-member gets 404 whether the group exists or not, so
+existence isn't leaked to outsiders. Adding a member: rejects an
+already-`ACTIVE` target with 409; reactivates an existing `LEFT` or
+`REMOVED` row (never creates a duplicate row for the same
+`(groupId, userId)` pair) and always resets the role to `MEMBER` on
+reactivation — it never silently restores a previous `ADMIN` role.
+Removal/leaving are status changes (`REMOVED`/`LEFT`), never row
+deletion. Role rules: `OWNER` may remove `ADMIN`/`MEMBER`; `ADMIN` may
+remove `MEMBER` only (not another `ADMIN`, never the `OWNER`); nobody
+can remove themselves via the remove-member endpoint (must use
+`/leave`); the `OWNER` cannot use `/leave` (no ownership-transfer flow
+exists yet — a deliberate, minimal limitation). A minimal
+`Notification` row (`GROUP_MEMBER_ADDED`) is written on add — no
+delivery mechanism. Added `resolveCurrentUser` middleware (reusing the
+existing `getOrCreateUserForIdentity`) so group routes have the
+caller's SplitFlow `User.id`, not just their Supabase identity. Added
+Zod schemas (`packages/validation` remains an unimplemented
+placeholder per prior decisions; schemas live in `apps/api/src/validation`
+for now) and a shared `parseOrThrow` helper for consistent 400s. No
+role-change/promote endpoint was implemented — not in this
+milestone's required endpoint list.
+
+**Rationale:** Matches the locked backend-authoritative,
+never-hard-delete, and roles-checked-server-side rules in `AGENTS.md`
+and this milestone's explicit instructions, without inventing
+mechanisms (invitations, ownership transfer, role management) that
+weren't asked for.
+
+**Status:** Adopted. `prisma/schema.prisma` is unmodified (still 12
+models / 8 enums). Verified against the real service/controller code
+using a temporary, non-delivered Prisma-client stub (the same
+network-blocked `prisma generate` limitation noted in prior entries
+still applies in this sandbox) — 20 business-logic assertions + 13
+validation assertions passed; the stub was deleted before delivery.
